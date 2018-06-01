@@ -50,3 +50,7 @@ We use the following datasets:
 
      Setting the variable `DPD_DOWNLOAD = TRUE` will attempt to download and
      unpack the extracts as `analysis.Rmd` is rendered.
+
+## Contact
+
+Questions about the analysis? Please contact `jon at pipitone dot ca`.
