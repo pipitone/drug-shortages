@@ -1,0 +1,744 @@
+---
+title: "Assessing Canada’s Drug Shortage Problem"
+#author: "Jon Pipitone"
+output: 
+  flexdashboard::flex_dashboard:
+    source_code: embed
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
+library(ggrepel)
+library(lubridate)
+
+# Terminology 
+# DPD = Drug Product Database
+# DSC = drugshortagescanada.ca - the current, mandatory reporting shortage databsae
+# DS  = drugshortages.ca - the previous, voluntary reporting shortage datbase
+
+# Settings (note: some figures have settings in their chunks)
+DSC_CSV = 'data/drugshortagescanada.ca-2017-12-31.csv'
+DS_MANUAL_CSV = 'data/drugshortages.ca-manual.csv'
+DS_EXPORT_CSV = 'data/drugshortages.ca-export.csv'
+ANALYSIS_PERIOD_START = as.Date("2013-04-01")   # start of manual collection period
+ANALYSIS_PERIOD_END   = as.Date("2016-03-31")   # end of manual collection period
+
+DPD_YEAR_START = ymd('1980-01-01') # earliest year to look at in the DPD
+DPD_YEAR_END = ymd('2017-01-01')   # latest year to look at in the DPD 
+
+# set to TRUE to attempt to download the latest DPD dataset
+DPD_DOWNLOAD = FALSE 
+
+# URL for the drug product database files
+DPD_URL_BASE='http://www.hc-sc.gc.ca/dhp-mps/alt_formats/zip/prodpharma/databasdon/'
+```
+
+```{r load-drug-shortage-data}
+# New Drug Shortages database
+drugshortagescanada_ca_raw = read_csv(DSC_CSV, col_types=cols(
+  DIN=col_character(),
+  `Shortage Start Date` = col_date(), 
+  `Anticipated Shortage Start Date` = col_date(), 
+  `Actual Shortage End Date` = col_date(), 
+  `Estimated Shortage End Date` = col_date()
+  )) 
+drugshortagescanada_ca = drugshortagescanada_ca_raw %>% 
+  mutate(start_date = if_else(is.na(`Shortage Start Date`), 
+                              `Anticipated Shortage Start Date`, `Shortage Start Date`),
+         end_date = if_else(is.na(`Actual Shortage End Date`), 
+                              `Estimated Shortage End Date`, `Actual Shortage End Date`),
+         source = 'drugshortagescanada.ca', 
+         resolution = 'Current') %>%
+  select(DIN, start_date, end_date, source, Reason, resolution)
+
+
+# Manually collected drugshortages.ca data collected during the analysis period
+drugshortages_ca_manual_raw = read_csv(DS_MANUAL_CSV)
+drugshortages_ca_manual = drugshortages_ca_manual_raw %>%
+  transmute(
+    DIN = din, 
+    start_date = as.Date(start_date), 
+    end_date = as.Date(est_resupply_date),
+    source = 'drugshortages.ca-manual', 
+    Reason = 'Unknown', 
+    resolution = outcome, 
+    resolution = 'unknown'
+  )
+
+# Export of the drugshortages.ca database obtained from the maintainer
+drugshortages_ca_export_raw = read_csv(DS_EXPORT_CSV)
+drugshortages_ca_export = drugshortages_ca_export_raw %>% 
+  transmute(
+    DIN = str_pad(DIN, 8, pad = "0"),
+    start_date = as.Date(`Start Date`),
+    end_date = as.Date(`Estimated Resupply Date`),
+    source = "drugshortages.ca-export", 
+    Reason = `Reason for Shortage`, 
+    resolution = if_else(is.na(Discontinued), Status, Discontinued))
+```
+
+```{r merge-shortage-datasets}
+# merge the drugshortages.ca datasets
+# We will only include data from the Export after the end of the analysis period
+drugshortages_ca = drugshortages_ca_export %>%
+  filter(start_date > ANALYSIS_PERIOD_END) %>%
+  bind_rows(drugshortages_ca_manual) %>%
+  group_by(DIN, start_date) %>%                   # remove duplicates
+  summarize(
+    end_date = first(end_date), 
+    source = 'drugshortages.ca',
+    Reason = first(Reason), 
+    resolution = first(resolution)) %>%
+  ungroup()
+
+# merge the datasets
+shortages = bind_rows(drugshortagescanada_ca, drugshortages_ca) %>% 
+  group_by(DIN, start_date) %>%
+  summarize(source = if_else(n() == 1, paste(source, collapse=" "), 'both')) %>%
+  ungroup()
+```
+
+```{r load-dpd-dataset}
+# Load the Health Canada Drug Product Database
+DPD_DATA_DIR = 'data/dpd/'
+
+if(DPD_DOWNLOAD) {
+  for (f in c('allfiles.zip', 'allfiles_ia.zip', 'allfiles_ap.zip', 'allfiles_dr.zip')) {
+    destfile = paste0(DPD_DATA_DIR, f)
+    download.file(paste0(DPD_URL_BASE, f), destfile)
+    unzip(destfile, exdir = DPD_DATA_DIR)
+  }
+}
+
+tables = list(
+  comp = c("DRUG_CODE","MFR_CODE","COMPANY_CODE","COMPANY_NAME","COMPANY_TYPE",
+           "ADDRESS_MAILING_FLAG","ADDRESS_BILLING_FLAG",
+           "ADDRESS_NOTIFICATION_FLAG","ADDRESS_OTHER","SUITE_NUMBER",
+           "STREET_NAME","CITY_NAME","PROVINCE","COUNTRY","POSTAL_CODE",
+           "POST_OFFICE_BOX","PROVINCE_F","COUNTRY_F"),
+  form = c("DRUG_CODE","PHARM_FORM_CODE","PHARMACEUTICAL_FORM",
+           "PHARMACEUTICAL_FORM_F"),
+  ingred = c("DRUG_CODE","ACTIVE_INGREDIENT_CODE","INGREDIENT",
+             "INGREDIENT_SUPPLIED_IND","STRENGTH","STRENGTH_UNIT",
+             "STRENGTH_TYPE","DOSAGE_VALUE","BASE","DOSAGE_UNIT","NOTES",
+             "INGREDIENT_F","STRENGTH_UNIT_F","STRENGTH_TYPE_F","DOSAGE_UNIT_F"),
+  package = c("DRUG_CODE","UPC","PACKAGE_SIZE_UNIT","PACKAGE_TYPE",
+              "PACKAGE_SIZE","PRODUCT_INFORMATION","PACKAGE_SIZE_UNIT_F",
+              "PACKAGE_TYPE_F"),
+  pharm = c("DRUG_CODE","PHARMACEUTICAL_STD"),
+  drug = c("DRUG_CODE","PRODUCT_CATEGORIZATION","CLASS",
+           "DRUG_IDENTIFICATION_NUMBER","BRAND_NAME","DESCRIPTOR",
+           "PEDIATRIC_FLAG","ACCESSION_NUMBER","NUMBER_OF_AIS",
+           "LAST_UPDATE_DATE","AI_GROUP_NO","CLASS_F","BRAND_NAME_F",
+           "DESCRIPTOR_F"),
+  route = c("DRUG_CODE","ROUTE_OF_ADMINISTRATION_CODE",
+            "ROUTE_OF_ADMINISTRATION","ROUTE_OF_ADMINISTRATION_F"),
+  sched = c("DRUG_CODE","SCHEDULE","SCHEDULE_F"),
+  status = c("DRUG_CODE","CURRENT_STATUS_FLAG","STATUS","HISTORY_DATE",
+             "STATUS_F","LOT_NUMBER","EXPIRATION_DATE"),
+  ther = c("DRUG_CODE","TC_ATC_NUMBER","TC_ATC","TC_AHFS_NUMBER","TC_AHFS",
+           "TC_ATC_F","TC_AHFS_F"),
+  vet = c("DRUG_CODE","VET_SPECIES","VET_SUB_SPECIES","VET_SPECIES_F")
+)
+
+for (table_name in names(tables)) {
+  headers = tables[[table_name]]
+  # create new variables based on the DPD table names (e.g. dpd_vet) and load in the
+  # data from the corresponding files (active, inactive, etc..) and merge them
+  assign(paste0('dpd_', table_name), 
+    dir(DPD_DATA_DIR, pattern = paste0(table_name, '.*.txt$'), full.names = TRUE) %>%
+      keep(function(x) file.size(x) > 0) %>%
+      map(read_csv, 
+          col_names = headers, 
+          locale = locale('en', date_format = '%d-%b-%Y'), 
+          col_types = map(headers,  function (x) # guess base on name 
+            case_when(
+              endsWith(x, '_DATE') ~ 'D', 
+              x == 'DRUG_CODE' ~ 'i', 
+              TRUE ~ 'c')) %>% 
+          setNames(headers), progress = FALSE) %>%
+      reduce(rbind)
+  )
+}
+
+# Restrict ourselves to just the prescription drugs for humans
+drug_product = dpd_drug %>%
+  filter(CLASS == 'Human') %>%
+  select(DRUG_CODE, DRUG_IDENTIFICATION_NUMBER, AI_GROUP_NO) %>%
+  mutate(IG = substr(AI_GROUP_NO, 3, 7))
+
+drug_codes_human = select(drug_product, DRUG_CODE)
+
+drug_sched_prescription = dpd_sched %>% 
+  filter(SCHEDULE == 'Prescription')
+
+drug_status = dpd_status %>% 
+  mutate(HISTORY_DATE = as.Date(HISTORY_DATE),
+         STATUS = fct_shift(as_factor(STATUS),2)) %>%
+  inner_join(drug_codes_human, by = 'DRUG_CODE') %>%
+  inner_join(drug_sched_prescription, by = 'DRUG_CODE') 
+
+# make a list of years
+years = tibble(
+    year.date = seq(DPD_YEAR_START, DPD_YEAR_END, by='years'), 
+    n = 1)
+
+# compute drug statuses for each year
+# We do this with a full cross join, and then filter non-sense rows
+# (An hack unworthy of a true computer scientist... but definitely worth a try)
+drug_yearly_status = drug_status %>%
+  mutate(n=1) %>%
+  full_join(years, by = 'n') %>%
+  filter(HISTORY_DATE <= year.date) %>%
+  group_by(year.date, DRUG_CODE) %>%
+  arrange(HISTORY_DATE, .by_group = T) %>%
+  summarize(status = last(STATUS)) 
+
+```
+
+Drug Shortages
+==============
+
+Row {data-width=300}
+--------------------
+
+### Shortage Datasets
+We have two sources of data on drug shortages: 
+
+#### drugshortages.ca
+- Active until March, 2017 
+- Voluntary reporting
+- We manually collected data from this database from 2013-04-01 through 2016-03-31 (`drugshortages.ca-manual.csv`)
+- We also obtained exports of this database as of various dates (`drughsortages.ca-export.csv`)
+
+#### drugshortagescanada.ca
+- Active from March 2017 to present
+- Mandatory reporting
+- Exports provided on demand via [online search](https://www.drugshortagescanada.ca/search?term=&date_range%5Bdate_range_start%5D%5Bmonth%5D=&date_range%5Bdate_range_start%5D%5Bday%5D=&date_range%5Bdate_range_start%5D%5Byear%5D=&date_range%5Bdate_range_end%5D%5Bmonth%5D=&date_range%5Bdate_range_end%5D%5Bday%5D=&date_range%5Bdate_range_end%5D%5Byear%5D=&filter_type=shortages&filter_status=_all_)
+- Note: The *anticipated shortage start date* is used if the start date is
+  blank. If a shortage for the same DIN and start date appears in both datasets it
+  is included once.
+
+### Ingredient Groups
+Ingredient Groups are taken from the [Drug Product Database](https://www.canada.ca/en/health-canada/services/drugs-health-products/drug-products/drug-product-database/terminology.html) 
+active ingredient group number which identifies the unique groups of active
+ingredients(s) regardless of strength. This is explained in more detail on the
+"Drug Products" tab.
+
+Row {.tabset}
+----------------------------------------------------
+### Figure 1 - Drug Shortages Per Month
+```{r figure-1-din-shortages}
+
+# period of time to display 
+YEAR_START = 2014
+YEAR_END = 2017
+
+figure_1_data = shortages %>%
+  filter(between(year(start_date), YEAR_START, YEAR_END)) %>%
+  mutate(start = floor_date(start_date, unit="month"), 
+         month = factor(format(start_date, "%b"), levels=month.abb))
+  
+write_csv(figure_1_data, 'figure_1-shortages-by-start-date.csv')
+
+figure_1 = figure_1_data %>%
+  ggplot(aes(x = month, fill = source)) + 
+  geom_bar() + 
+  labs(y = "# of DINs", x = "Anticipated/Actual Shortage Start Date") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, size=8, vjust=0.3), 
+        panel.grid = element_blank(), 
+        strip.placement = "outside", 
+        legend.position = "bottom") +
+  facet_grid(. ~ year(start_date), switch="x") +
+  scale_fill_discrete(guide = guide_legend(title = "Source")) + 
+  scale_y_continuous(expand=c(0,0)) + 
+  labs(
+    title = "Drug Shortages per Month, Canada, 2012–16", 
+    caption = paste("Last updated:", now()), 
+    subtitle = "Duplicates determined by DIN and start date only (and are only counted once)")
+
+ggsave('figure_1-shortages-by-start-date.png', plot = figure_1)
+figure_1
+```
+
+### Figure 3 - Shortages by Innovator Status
+```{r shortages-innovator}
+figure_3_data = drugshortages_ca_manual_raw %>% 
+  mutate(start_date = as.Date(start_date)) %>%
+  mutate(month = factor(format(start_date, "%b"), levels=month.abb), 
+         company_type = fct_rev(company_type)) %>%
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END)) 
+
+figure_3_data %>%
+  mutate(Year = year(start_date)) %>%
+  group_by(Year, month, company_type) %>%
+    summarize(count = n()) %>%
+  write_csv("figure-3_shortages_by_company_type_by_month.csv")
+
+figure_3 = figure_3_data %>%
+  ggplot(aes(x = month, fill = company_type)) +
+  #ggplot(aes(x = year(start_date), fill = company_type)) +
+    geom_bar() + 
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 90, size=8, vjust=0.3), 
+          panel.grid = element_blank(), 
+          strip.placement = "outside", 
+          legend.position = "bottom") +
+    scale_fill_discrete(guide = guide_legend(title = "")) + 
+    labs(title = "Shortages of Generic or Innovator Drug Products over a Three-Year Period, Canada, 2013–16", 
+         subtitle = "Three year period 2013*-2016**", 
+         y = "", 
+         x = "Month") + 
+  facet_grid( ~ year(start_date))
+
+ggsave('figure-3_shortages-by-company-type.png', plot = figure_3)
+figure_3
+```
+
+### Figure 5 - Shortages by Ingredient Group
+
+```{r ig-shortages}
+TOP_N_IG = 20
+
+# Date range to display shortage ingredient groups
+IG_START_DATE = as.Date('2017-03-01') 
+IG_END_DATE = as.Date('2017-12-31')
+
+shortages_with_IG = 
+  inner_join(drug_product, shortages,  by=c('DRUG_IDENTIFICATION_NUMBER' = 'DIN')) %>%
+  inner_join(dpd_route, by='DRUG_CODE') %>%
+  filter(ROUTE_OF_ADMINISTRATION == 'ORAL' | ROUTE_OF_ADMINISTRATION == 'INTRAMUSCULAR')
+
+figure_5_data = shortages_with_IG %>%
+  mutate(year = year(start_date)) %>%
+  filter(between(start_date, IG_START_DATE, IG_END_DATE)) %>%
+  group_by(year, IG) %>%
+    summarize(n = n()) %>%
+    ungroup() %>%
+  filter(n > 1) %>%
+  arrange(year, desc(n)) %>%
+  group_by(year) %>%
+    top_n(TOP_N_IG, wt = n) %>%
+  ungroup() %>%
+  inner_join(drug_product, by = "IG") %>%
+  inner_join(dpd_ingred, by = "DRUG_CODE") %>%
+  select(IG, n, year, INGREDIENT) %>%
+  mutate(INGREDIENT = gsub(' \\(.*\\)','', INGREDIENT)) %>%
+  mutate(IG_NAME = paste(INGREDIENT, '(', IG, ')')) %>%
+  unique()
+
+write_csv(figure_5_data, 'figure_5-shortages_by_IG.csv')
+
+figure_5 = figure_5_data %>%
+  ggplot(aes(x = reorder(IG_NAME, n), y = n, fill = reorder(IG_NAME, n))) +
+    theme(axis.text.x = element_text(angle = 90, size=8, vjust=0.3), 
+          legend.text=element_text(size=5), 
+          legend.position = 'none') +  
+    geom_bar(stat = 'identity', na.rm = T) +
+    coord_flip() + 
+    #facet_grid(. ~ year, scales = "free") + 
+    labs(
+      title = "Top 21 Shortages by Ingredient (and Group Number), Canada, March–December 2017", 
+      subtitle = paste0("Top ", TOP_N_IG, "ish most common Ingredient Groups shown. IM/PO only"), 
+      caption = paste('Sources: DPD, DSC. Updated:', now()), 
+      x = "Ingredient (Group #)", 
+      y = "Number of Shortages"
+    ) + 
+    scale_fill_discrete(guide = guide_legend(title = "Ingredient (Ingredient Group)")) 
+
+ggsave('figure_5-shortages_by_IG.png', plot = figure_5)
+figure_5
+```
+### Figure 9: Top 10 Drugs MFRs by Shortages
+
+```{r marketed-drugs-in-shortage-by-manufacturer}
+# The analysis period starts and ends midway through a year, but we have
+# have drugs active per year, so we need to floor our dates. 
+MFR_START_YEAR = floor_date(ANALYSIS_PERIOD_START, unit = "year")
+MFR_END_YEAR = floor_date(ANALYSIS_PERIOD_END, unit = 'year')
+TOP_N_MFR_MARKETED = 10
+
+mfr_products = drug_yearly_status %>%
+  filter(between(year.date, MFR_START_YEAR, MFR_END_YEAR), status %in% c('MARKETED')) %>%
+  group_by(DRUG_CODE) %>%
+  summarise() %>%
+  inner_join(dpd_comp, by="DRUG_CODE") %>%
+  group_by(COMPANY_NAME) %>%
+  summarize(n_products = n())
+  
+# compute the shortages during the analysis period
+mfr_shortages = drugshortages_ca %>% 
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END)) %>%
+  inner_join(drug_product, by=c('DIN' = 'DRUG_IDENTIFICATION_NUMBER')) %>%
+  inner_join(dpd_comp, by='DRUG_CODE') %>%
+  group_by(COMPANY_NAME) %>%
+  summarize(n_shortages = n())
+
+# join and compute the percentage shortages of marketed drugs
+mfr_percent_shortages = inner_join(mfr_shortages, mfr_products, by='COMPANY_NAME') %>%
+  mutate(percent_mfr_products_in_shortage = round(n_shortages / n_products * 100), 
+         percent_shortages_of_overall = round(n_shortages / sum(n_shortages) * 100), 
+         percent_products_of_overall = round(n_products / sum(n_products) * 100)) %>%
+    top_n(TOP_N_MFR_MARKETED, wt = n_shortages)
+  
+write_csv(mfr_percent_shortages, 'figure_9-mfr_product_shortages.csv')
+
+figure_9 = mfr_percent_shortages %>%
+  ggplot(aes(x = percent_products_of_overall, y = percent_shortages_of_overall, label = COMPANY_NAME)) + 
+    theme_minimal() + 
+    geom_point() + 
+    geom_abline(slope = 1, intercept = 0, linetype=2, alpha=0.2) + 
+    geom_text_repel(size = 2, segment.alpha = 0) +
+    coord_cartesian(xlim = c(0, 11), ylim=c(0,17)) + 
+    labs(title = paste("Top",TOP_N_MFR_MARKETED, "Drugs Producers by Number of Shortages, Canada, 2013–16"),
+         subtitle = paste("Over the analysis period", ANALYSIS_PERIOD_START, "to", ANALYSIS_PERIOD_END),
+         caption = paste("Source: DS, DPD   Updated:", now()),
+         x = "% of marketed drug products", 
+         y = "% of shortages")
+ggsave('figure_9-mfr_product_shortages.png', figure_9)
+figure_9
+```
+
+### Table 3 - Oral Drug shortages by Company
+
+```{r table_3_pre}
+oral_shortages = drugshortages_ca_manual_raw %>%
+  mutate(start_date = as.Date(start_date)) %>%
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END), 
+         route_of_administration == 'Oral')
+
+total_oral_shortages = nrow(oral_shortages)
+
+table_3 = oral_shortages %>%
+  group_by(company_name) %>%
+  summarize(n_shortages = n(), n_products = n_distinct(din)) %>%
+  ungroup() %>%
+  arrange(desc(n_shortages)) %>%
+  mutate(percent_total_shortages = round(n_shortages/total_oral_shortages * 100,2), 
+         cum_percent_shortages = cumsum(n_shortages)/total_oral_shortages*100) %>%
+  filter(cum_percent_shortages <= 90) %>%
+  bind_rows (
+    summarize(.,
+      company_name = 'TOTAL', 
+      n_shortages = sum(n_shortages), 
+      n_products = sum(n_products), 
+      percent_total_shortages = sum(percent_total_shortages), 
+      cum_percent_shortages = sum(cum_percent_shortages)
+      )
+  ) %>%
+  transmute(
+    "Company Name" = company_name, 
+    "# of Products (DIN)" = n_products, 
+    "# of Shortages" = n_shortages,
+    "% of Total Shortages" = percent_total_shortages
+  ) 
+```
+
+Table 3 Twenty Generic+ and Innovator++ Companies Reporting 90% of `r total_oral_shortages` ‘Oral’ Drug Shortages (April 1st 2013 – March 31st 2016) (Source: www.drugshortage.ca, launched in 2012)
+
+```{r table_3}
+knitr::kable(table_3)
+```
+
+### Table 4 - Injectable Drug shortages by Company
+```{r table_4_pre}
+inject_shortages = drugshortages_ca_manual_raw %>%
+  mutate(start_date = as.Date(start_date)) %>%
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END), 
+         route_of_administration == 'Injectable')
+
+total_inject_shortages = nrow(inject_shortages)
+
+table_4 = inject_shortages %>%
+  group_by(company_name) %>%
+  summarize(n_shortages = n(), n_products = n_distinct(din)) %>%
+  ungroup() %>%
+  arrange(desc(n_shortages)) %>%
+  mutate(percent_total_shortages = round(n_shortages/total_inject_shortages * 100,2), 
+         cum_percent_shortages = cumsum(n_shortages)/total_inject_shortages*100) %>%
+  filter(cum_percent_shortages <= 90) %>%
+  bind_rows (
+    summarize(.,
+      company_name = 'TOTAL', 
+      n_shortages = sum(n_shortages), 
+      n_products = sum(n_products), 
+      percent_total_shortages = sum(percent_total_shortages), 
+      cum_percent_shortages = sum(cum_percent_shortages)
+      )
+  ) %>%
+  transmute(
+    "Company Name" = company_name, 
+    "# of Products (DIN)" = n_products, 
+    "# of Shortages" = n_shortages,
+    "% of Total Shortages" = percent_total_shortages
+  ) 
+```
+
+Table 4 Twenty Generic+ and Innovator++ Companies Reporting 90% of `r total_inject_shortages` ‘Injectable’ Drug Shortages (April 1st 2013 – March 31st 2016) (Source: www.drugshortage.ca, launched in 2012)
+
+```{r table_4}
+knitr::kable(table_4)
+```
+
+
+Drug Products
+====================
+
+Row {data-width=300}
+-------------------- 
+
+### Background
+The Health Canada [Drug Product Database](https://www.canada.ca/en/health-canada/services/drugs-health-products/drug-products/drug-product-database.html) provides historical records of drug products (and provides [extracts](https://www.canada.ca/en/health-canada/services/drugs-health-products/drug-products/drug-product-database/what-data-extract-drug-product-database.html))
+
+For the following charts, we only consider prescription drugs for humans. 
+
+The DPD contains records tracking the change in a DINs status over time (in the `QRYM_STATUS`) table. Drug products are given a status of either: `APPROVED`, `MARKETED`, `CANCELLED POST-MARKET`, `CANCELLED PRE-MARKET`, or `DORMANT`.
+
+The following chart shows, for each year, the number of drug products categorized by their status in that year. Drug product status in a year is taken from the most recent QRYM_STATUS entry to the year.
+
+Row
+------------
+
+### DIN Status
+
+```{r din-status-by-year, fig.width=10}
+ggplot(drug_yearly_status, aes(x = year.date, fill=status)) + 
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "DIN Status by Year",
+       subtitle = "Status determined by most recent status change", 
+       caption = paste('Source: Health Canada Drug Product Database. Updated:', now()), 
+       x = "Year", y = "DIN Count")
+```
+
+### Figure 8: Market Share By MFR
+
+```{r din-manufacturers}
+MFR_MIN_PERCENT = 3
+MFR_START_YEAR = floor_date(ANALYSIS_PERIOD_START, unit = "year")
+MFR_END_YEAR = floor_date(ANALYSIS_PERIOD_END, unit = "year")
+
+active_drugs_10yrs = drug_yearly_status %>%
+  filter(between(year.date, MFR_START_YEAR, MFR_END_YEAR), status %in% c('MARKETED')) %>%
+  group_by(DRUG_CODE) %>%
+  summarise() %>%
+  inner_join(dpd_comp, by="DRUG_CODE") %>%
+  group_by(COMPANY_NAME) %>%
+  summarize(n = n()) %>%
+  mutate(percent = n/sum(n) * 100, 
+         company_name = if_else(percent >= MFR_MIN_PERCENT, COMPANY_NAME, 'other')) %>%
+  group_by(company_name) %>%
+  summarize(percent = sum(percent), n_companies = n()) %>%
+  mutate(company_name = if_else(company_name == 'other', 
+                                paste0('Other (', n_companies, ' manufacturers, ', round(percent), '%)'), 
+                                paste0(company_name, ' (', round(percent), '%)')))
+
+active_drugs_10yrs$company_name = fct_shift(fct_reorder(active_drugs_10yrs$company_name, -active_drugs_10yrs$percent), n=1)
+
+write_csv(active_drugs_10yrs, 'figure_8-company_market_share.csv')
+
+figure_8 = active_drugs_10yrs %>%
+  ggplot(aes(x = "", y = percent, fill = company_name)) + 
+    #theme(legend.position = "none") + 
+    geom_bar(stat = 'identity') + 
+    theme_void() + 
+    scale_fill_discrete(guide = guide_legend(title = "Manufacturer")) + 
+    coord_polar(theta = 'y', direction = -1) + 
+    labs(title = "Market Share by Major Drugs Producer, Canada, 2013–16",
+         subtitle = paste("Only manufacturers of >= %",MFR_MIN_PERCENT," of DINs listed explicitly", sep=""), 
+         caption = paste("Source: DPD, Updated: ", now()), 
+         x = '', y = '')
+ggsave('figure_8-company_market_share.png', plot = figure_8)
+figure_8
+```
+
+Innovator vs. Generics
+===========================
+
+Row {data-width=300}
+--------------------
+
+### Background 
+
+In this section we look at innovator vs. generic drug products historically. To
+determine whether a drug product is an innovator or generic we make the
+assumption innovator drug products are always created before generic drug
+products. Therefore in a group of drug products with the same active
+ingredients, the earliest manufacturer is the innovator and all their drug
+products in the group are marked as such. All other drug products, are marked as
+generic.
+
+[From the DPD page on Terminology](https://www.canada.ca/en/health-canada/services/drugs-health-products/drug-products/drug-product-database/terminology.html): 
+
+"The AIG [Active Ingredient Group] number is a 10 digit number that identifies products that have the same active   ingredient(s) and ingredient strength(s). The AIG is comprised of three portions:
+
+  - the first portion (2 digits) identifies the number of active ingredients
+  - the second portion(5 digits) identifies the unique groups of active ingredients(s);
+  - the last portion (3 digits) identifies the active ingredient group strength. The   strength group has a tolerance of -2% to +10%."
+
+Innovator/Generic status is determined within groups determined by the second portion of the AIG only so that drug strength is ignored.
+
+The following chart shows only the active drug products (`MARKETED`) over time. 
+
+```{r innovator-setup, include = FALSE}
+# A list of innovator drug companies per ingredient group (IG)
+innovator_drugs = drug_product %>%
+  select(DRUG_CODE, IG) %>%
+  inner_join(dpd_status, by = 'DRUG_CODE') %>%
+  inner_join(dpd_comp, by = 'DRUG_CODE') %>%
+  group_by(IG) %>%
+  arrange(HISTORY_DATE, .by_group = T) %>%
+  summarise(COMPANY_CODE = first(COMPANY_CODE))
+  
+# All drug products with the Innovator/Generic status
+drug_product_innovator = 
+  drug_product %>%
+  inner_join(dpd_comp, by='DRUG_CODE') %>%
+  inner_join(innovator_drugs, by = 'IG', suffix = c(".p", ".innovator")) %>%
+  mutate(is_innovator = 
+           if_else(COMPANY_CODE.p == COMPANY_CODE.innovator, 'Innovator', 'Generic')) %>%
+  select(DRUG_CODE, DRUG_IDENTIFICATION_NUMBER, AI_GROUP_NO, IG, is_innovator)
+
+# Yearly counts of active (MARKETED/APPROVED) drugs categorized by Innovator/Generic status
+drug_yearly_status_innovator = 
+  inner_join(drug_product_innovator, drug_yearly_status, by='DRUG_CODE') %>% 
+  mutate(is_innovator = as.factor(is_innovator))
+```
+
+
+Row
+--------------
+### Figure 10: Drug Products (DINs) by Year
+
+```{r}
+marketed_status = drug_yearly_status_innovator %>%
+  filter(status %in% c('MARKETED')) 
+
+# rearrange to export results for the plot
+write_csv(marketed_status %>%
+  group_by(year.date, is_innovator) %>%
+  summarize(n = n()), 'figure_10-marketed-DINs-over-time.csv')
+
+figure_10 = marketed_status %>%
+  ggplot(aes(x = year.date, fill = is_innovator)) + 
+    geom_bar() + 
+    theme_minimal() + 
+    theme(legend.position = 'bottom') +
+    scale_fill_discrete(guide = guide_legend(title = "Innovator Status")) +
+    labs(title = "Drug Products (DINs) Available Each Year, Canada, 1970–2017", 
+         subtitle = 'Innovator drugs determined per IG group by company first to market',
+         caption = paste('Source: Health Canada Drug Product Database. Updated:', now()), 
+         x = "Year", 
+         y = "DIN Count") 
+ggsave('figure_10-marketed-DINs-over-time.png', plot = figure_10)
+figure_10
+```
+
+Supplementary Figures
+=====================
+
+Row {.tabset}
+--------------
+
+### Shortages by Reasons
+```{r shortages-reasons, fig.width=8}
+
+drugshortagescanada_ca %>%
+  mutate(year = year(start_date)) %>%
+  filter(year == 2017) %>%
+  mutate(month = month(start_date, label = T, abbr = TRUE)) %>%
+  ggplot(aes(x = month, fill = Reason)) + 
+    geom_bar() + 
+    labs(title = "Reasons for shortages in drugshortagescanada.ca", 
+         subtitle = "")
+```
+
+### Shortages by Duration
+
+```{r shortages-by-duration, fig.width=8}
+#bind_rows(drugshortagescanada_ca, drugshortages_ca)
+drugshortagescanada_ca %>%
+  mutate(duration = end_date - start_date) %>%
+  filter(duration < 365 & duration > 0) %>%
+  ggplot(aes(x=duration, fill=Reason)) + 
+    geom_histogram(binwidth = 30) + 
+    theme_minimal() + 
+    facet_grid( . ~ source) + 
+    labs(title = "Duration of drug shortages", 
+         x = "Duration (days)",
+         y = "Number of shortagse")
+```
+
+### Shortages by Duration/Resolution
+
+```{r duration-resolution}
+
+#bind_rows(drugshortagescanada_ca, drugshortages_ca)
+drugshortages_ca %>%
+  mutate(duration = end_date - start_date, 
+         resolution = fct_relevel(as_factor(resolution), "Discontinued", "Resolved", "Current")) %>%
+  filter(duration < 365 & duration > 0) %>%
+  ggplot(aes(x=duration, fill=resolution)) + 
+    geom_histogram(binwidth = 30) + 
+    theme_minimal() + 
+    facet_grid( . ~ source) + 
+    labs(title = "Duration of drug shortages", 
+         subtitle = "Only shortages <1 year are shown",
+         x = "Duration (days)",
+         y = "Number of shortagse")
+```
+
+### Shortages Per Manufacturer
+```{r manufacturers-by-num-shortages}
+MFR_MIN_PERCENT = 5
+
+mfr_shortages = drugshortages_ca %>% 
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END)) %>%
+  inner_join(drug_product, by=c('DIN' = 'DRUG_IDENTIFICATION_NUMBER')) %>%
+  inner_join(dpd_comp, by='DRUG_CODE') %>%
+  group_by(COMPANY_NAME) %>%
+  summarize(n_shortages = n()) %>%
+  mutate(percent = n_shortages/sum(n_shortages) * 100, 
+         company_name = if_else(percent >= MFR_MIN_PERCENT, COMPANY_NAME, 'other')) %>%
+  group_by(company_name) %>%
+  summarize(percent = sum(percent), n_companies = n(), n_shortages = sum(n_shortages)) %>%
+  mutate(company_name = if_else(company_name == 'other', 
+                                paste0('Other (', n_companies, ' manufacturers, ', n_shortages, 
+                                       ' shortages, ', round(percent), '%)'), 
+                                paste0(company_name, ' (', n_shortages, ' shortages, ', 
+                                       round(percent), '%)')))
+
+mfr_shortages$company_name = fct_shift(fct_reorder(mfr_shortages$company_name, -mfr_shortages$percent), n=1)
+
+mfr_shortages %>%
+  ggplot(aes(x = "", y = percent, fill = company_name)) + 
+    geom_bar(stat = 'identity') + 
+    theme_void() + 
+    scale_fill_discrete(guide = guide_legend(title = "Manufacturer")) + 
+    coord_polar(theta = 'y', direction = -1) + 
+    labs(title = paste0("% of shortages during analysis period (", 
+                       ANALYSIS_PERIOD_START, " to ", ANALYSIS_PERIOD_END, ')'), 
+         caption = paste("Source: DS, Updated: ", now()), 
+         x = '', y = '')
+```
+
+### Shortages by Route
+
+```{r shortages_by_route}
+drugshortages_ca_manual_raw %>%
+  mutate(start_date = as.Date(start_date)) %>%
+  filter(between(start_date, ANALYSIS_PERIOD_START, ANALYSIS_PERIOD_END), 
+         route_of_administration %in% c('Oral', 'Injectable')) %>%
+  group_by(company_type, route_of_administration) %>%
+  summarise(Products = n_distinct(product_name), Shortages = n()) %>%
+  gather(Measure, Count, -company_type, -route_of_administration) %>%
+  ggplot(aes(x = company_type, y = Count, fill=Measure)) + 
+    geom_bar(stat='identity', position='dodge') + 
+    theme_minimal() +
+    theme(legend.position = "bottom") + 
+    scale_fill_discrete(guide = guide_legend(title = "")) + 
+    facet_wrap(~route_of_administration) + 
+    labs(x = "")
+```
