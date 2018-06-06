@@ -4,7 +4,7 @@ This is a companion repository containing some of the source code and data used 
 
 > Donelle, J., Duffin, J., Pipitone, J., & White-Guay, B. (2018). Assessing
 > Canada’s Drug Shortage Problem. C.D. Howe Institute, Commentary, 515. Retrieved
-> June 5, 2018, from www.cdhowe.org.
+> June 5, 2018, from [www.cdhowe.org](https://www.cdhowe.org/public-policy-research/assessing-canada%E2%80%99s-drug-shortage-problem)
 
 To run this code you will need: 
 
