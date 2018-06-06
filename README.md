@@ -23,6 +23,8 @@ The code is embedded in an rmarkdown document. To render the document, open
 rmarkdown::render("analysis.Rmd")
 ```
 
+The output is viewable online here: https://pipitone.github.io/drug-shortages/
+
 ## Datasets
 
 We use the following datasets: 
