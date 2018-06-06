@@ -39,9 +39,15 @@ We use the following datasets:
   March 2017 onwards. An export of this dataset as of 2017-12-31 is located in
   `data/drugshortagescanada.ca-2017-12-31.csv`. 
   
-    Exports can be obtained on demaned by using the [drughsortagescanada.ca online search](https://www.drugshortagescanada.ca/search?term=&date_range%5Bdate_range_start%5D%5Bmonth%5D=&date_range%5Bdate_range_start%5D%5Bday%5D=&date_range%5Bdate_range_start%5D%5Byear%5D=&date_range%5Bdate_range_end%5D%5Bmonth%5D=&date_range%5Bdate_range_end%5D%5Bday%5D=&date_range%5Bdate_range_end%5D%5Byear%5D=&filter_type=shortages&filter_status=_all_)
+    Exports can be obtained on demand by using the [drugshortagescanada.ca online search](https://www.drugshortagescanada.ca/search?term=&date_range%5Bdate_range_start%5D%5Bmonth%5D=&date_range%5Bdate_range_start%5D%5Bday%5D=&date_range%5Bdate_range_start%5D%5Byear%5D=&date_range%5Bdate_range_end%5D%5Bmonth%5D=&date_range%5Bdate_range_end%5D%5Bday%5D=&date_range%5Bdate_range_end%5D%5Byear%5D=&filter_type=shortages&filter_status=_all_)
 
-  
+    The drugshortagescanada.ca *does not provide historical data* that tracks
+    changes to shortage reports. Therefore, we are currently recording daily
+    snapshots of the dataset here: 
+
+    https://github.com/pipitone/drug-shortages-snapshots
+    
+
 - **Health Canada Drug Product Database**: Historical drug product information
    provided by Health Canada. This dataset cannot be provided in this repository
    but exports may be downloaded at: 
