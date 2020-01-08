@@ -23,9 +23,11 @@ sources = list(labs(caption = "source: drugshortagescanada.ca\nauthor: Jon Pipit
 
 # load data
 DSCDATA= "data/dsc_shortages_2020-12-29.csv"
-dsc_df = read_csv(DSCDATA, col_types = cols(
-  status = col_factor(),
-  shortage_reason_en = col_factor())) %>%
+dsc_df = read_csv(DSCDATA, trim_ws = T, 
+                  col_types = cols(
+                    status = col_factor(),
+                    shortage_reason_en = col_factor()
+                  )) %>%
   mutate(
     reason = fct_recode(shortage_reason_en,  
       "Demand increase" = "Demand increase for the drug.", 
@@ -41,6 +43,9 @@ dsc_df = read_csv(DSCDATA, col_types = cols(
     end_date_no_na = coalesce(actual_end_date, estimated_end_date, FAR_FUTURE), 
     start_date_no_na = coalesce(actual_start_date, anticipated_start_date, FAR_PAST))
 ```
+
+Shortages
+==========
 
 Column
 -----------------------------------------------------------------------
@@ -149,4 +154,47 @@ valueBox(nrow(expected_shortages), icon="fa-clock")
 ```{r}
 knitr::kable(dsc_df %>% group_by(status) %>% summarize(n = n()))
 ```
+
+
+Essential Medicines 
+=======================
+
+Column 
+-----------------
+
+### Essential medicines
+```{r}
+# via https://dx.doi.org/10.9778%2Fcmajo.20160122
+emlist = read_csv('data/essential-medicines.csv', trim_ws=T) %>% 
+  pivot_longer(-who_class, values_to = "medicine", values_drop_na=T) %>%
+  select(-name) %>%
+  mutate(drug_name = paste0('\\b', str_to_lower(medicine),'\\b'))
+
+dsc_df %>%
+  mutate(drug_name = str_to_lower(en_ingredients)) %>%
+  fuzzy_left_join(emlist, by = c("drug_name" = "drug_name"), match_fun = str_detect) %>%
+  mutate(who_class = replace_na(who_class, "Not an essential medicine")) %>%
+  mutate(who_class = fct_infreq(who_class)) %>%
+  group_by(who_class) %>%
+  summarize(num_shortages = n()) %>%
+  mutate(percent_shortages = num_shortages/sum(num_shortages) * 100)  %>%
+  ggplot(aes(x = who_class, y = percent_shortages, fill=who_class)) +
+  geom_bar(stat="identity") + 
+  labs(y="Percent of shortages", fill=NULL) + 
+  theme(axis.text.x = element_blank()) + 
+  scale_x_discrete(breaks=NULL) + 
+  sources
+  
+  #stringdist_inner_join(dsc_df, by = c(medicine = "en_drug_common_name")) %>%
+#  filter(str_detect(str_to_lower(en_drug_common_name), str_to_lower(medicine))) %>%
+```
+
+
+
+
+
+
+
+
+
 
