@@ -526,6 +526,15 @@ ggplot(drug_yearly_status, aes(x = year.date, fill=status)) +
        caption = paste('Source: Health Canada Drug Product Database. Updated:', now()), 
        x = "Year", y = "DIN Count")
 ```
+### Number of ATC codes marketed today 
+
+```{r}
+drug_yearly_status %>%
+  filter(year.date == ymd("2019-01-01"), status == "MARKETED") %>%
+  inner_join(dpd_ther) %>%
+  group_by(TC_ATC_NUMBER) %>%
+  summarize()
+```
 
 ### Figure 8: Market Share By MFR
 

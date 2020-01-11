@@ -1,0 +1,139 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Note: meant to be use used in conjunction with the dashboard.Rmd setup. 
+### Shortages by ATC code
+```{r}
+dsc_df %>%
+  filter(actual_start_date > ymd("2019-01-01")) %>%
+  filter(status %in% c("resolved", "active_confirmed")) %>%
+  group_by(atc_number) %>%
+  summarize(n=n()) %>%
+  filter(n>50) %>%
+  ggplot(aes(x=atc_number,y=n)) +
+    geom_bar(stat="identity")
+```
+### Diltiazem
+```{r}
+ramipril = "C09AA05"
+diltiazem = "C08DB01"
+candesarten = "C09CA06"
+gabapentin = "N03AX12"
+
+dsc_df  %>%
+  filter(atc_number == diltiazem) %>%
+  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+  mutate(
+    actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
+    actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
+    label = factor(id, labels = paste(en_drug_common_name, drug_strength)),
+    label = fct_reorder(label, actual_start_date, .desc=F), 
+    ) %>%
+  ggplot(aes(x=actual_start_date, y=label, yend=label, color = reason)) + 
+    geom_segment(size=1, aes(xend=actual_end_date_far), linetype="dashed") + 
+    geom_segment(size=4, aes(xend=actual_end_date_near), linetype="solid") + 
+    facet_grid(company_name~., scales="free_y", space="free_y") + 
+    scale_colour_brewer(palette = "Paired") + 
+    theme(strip.placement="outside", 
+          strip.text.y = element_text(angle=0), 
+          strip.background = element_rect(color="white", fill="#EEEEEE")) +
+    labs(y = NULL, x="Time", color="Reason for shortage", 
+         title="Shortages for Diltiazem in 2019") + 
+    caption
+    
+```
+### How well are ATC_number's recorded
+```{r}
+dsc_df %>%
+  filter(actual_start_date > ymd("2019-01-01")) %>%
+  mutate(atc_length = str_length(atc_number)) %>%
+  group_by(atc_length) %>%
+  summarize(n = n()) %>%
+  arrange(atc_length)
+```
+
+
+### Shortages for an ATC superclass
+```{r}
+dsc_df  %>%
+  filter(actual_start_date > "2018-01-01") %>%
+  mutate(atc_short = substr(atc_number,1,5)) %>%
+  filter(atc_short == "C09CA") %>%
+  mutate(
+    actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
+    actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
+    id = fct_reorder(factor(id), actual_start_date), 
+    ) %>%
+  ggplot(aes(x=actual_start_date, y=id, yend=id, color = reason)) + 
+    geom_segment(size=1, aes(xend=actual_end_date_near), linetype="solid") + 
+    facet_grid(company_name~., scales="free_y", space="free_y") + 
+    scale_colour_brewer(palette = "Paired") + 
+    theme(strip.placement="outside", 
+          strip.text.y = element_blank(), 
+          axis.text.y = element_blank()) +
+    labs(y=NULL, x=NULL, color="Reason for shortage", 
+         title="Shortages for in C09CA") + 
+    caption
+```
+
+
+### Do shortages occur during particular times of the year, etc?
+
+```{r}
+durations = dsc_df %>%
+  filter(status %in% c("resolved")) %>%
+  mutate(start_yday = yday(actual_start_date), 
+         end_yday = yday(actual_end_date), 
+         duration = interval(actual_start_date, actual_end_date)/days(1))
+durations %>%
+  filter(duration < 2000) %>%
+  mutate(i=1) %>%
+  inner_join(tibble(i = 1, yday = seq(1, 365))) %>%
+  filter(start_yday <= yday & yday <= end_yday) %>%
+  ggplot(aes(x=as_date(yday-1))) + 
+    geom_histogram(bins=365) + 
+    labs(title="shortages by day of year")
+
+durations %>%
+  ggplot(aes(x=yday(actual_start_date))) + 
+  geom_histogram(bins=365) + 
+  labs(title="shortage START date by day of year")
+
+durations %>%
+  filter(!is.na(created_date)) %>%
+  ggplot(aes(x=wday(created_date, week_start=1, label=T))) + 
+  geom_histogram(bins=7,stat="count")
+```
+
+### 
+### Advanced warning
+```{r}
+dsc_df %>%
+  filter(actual_start_date > ymd("2019-01-01")) %>%
+  mutate(warning = round(interval(created_date, actual_start_date)/months(1)), 
+         reason = fct_infreq(reason)) %>%
+  filter(warning < 24) %>%
+  ggplot(aes(x=warning)) + 
+  geom_rect(xmin=0,xmax=6,ymin=0,ymax=2000,alpha=0.1,fill="lightgrey") + 
+  geom_histogram(binwidth=1) + 
+  facet_wrap(~reason) + 
+  labs(x="Time between report created and shortage start date (months)", 
+       y = "Number of shortages", 
+       title = "Advanced warning for shortages") + 
+  scale_y_log10() + 
+  caption
+```  
+
+### Comments
+Are there anything interesting in the comments? 
+```{r}
+dsc_df %>% 
+  filter(actual_start_date >= ymd("2019-01-01")) %>%
+  mutate(comments = str_to_lower(en_comments)) %>%
+  group_by(comments) %>%  
+  summarise() %>%
+  select(comments) %>%
+  write_csv("2019_comments.csv")
+```
