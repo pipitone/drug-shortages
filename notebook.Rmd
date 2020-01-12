@@ -54,6 +54,58 @@ dsc_df %>%
   arrange(atc_length)
 ```
 
+### Duplicate DINs in the DPD
+```{r}
+dpd_human_current %>%
+  group_by(DRUG_IDENTIFICATION_NUMBER) %>%
+  summarize(n=n()) %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+```
+
+### DSC ATC fields that aren't prefixes of the DPD's ATC
+```{r}
+din_to_atc = inner_join(dpd_drug, dpd_ther) %>% 
+  select(din = DRUG_IDENTIFICATION_NUMBER, dpd_atc_number = TC_ATC_NUMBER) %>% 
+  distinct()
+
+dsc_df_dpd_atc = left_join(dsc_df, din_to_atc, by=c("din"))
+
+dsc_df_dpd_atc %>%
+  select(atc_number, dpd_atc_number) %>%
+  mutate(tc_substr = substring(dpd_atc_number, 1, str_length(atc_number))) %>%
+  filter(atc_number != tc_substr)
+```
+
+### redo the EML analysis with the patched ATCs
+```{r}
+dsc_df %>%
+  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+  right_join(emlist, by=c("dpd_atc_number" = "atc_number"))  %>%
+  filter(!is.na(din))  %>%
+  group_by(category, medication, dpd_atc_number) %>%
+  summarize(Shortages = n()) %>%
+  rename(Category = category, 
+         Medication = medication,
+         ATC = dpd_atc_number) %>%
+  arrange(desc(Shortages))
+```
+
+All 2019 shortages by EML category
+```{r}
+dsc_df_patched_atc %>%
+  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+  left_join(emlist, by=c("TC_ATC_NUMBER" = "atc_number"))  %>%
+  mutate(category = replace_na(category, "Not an essential medicine")) %>%
+  mutate(category = str_replace(category, " -.*", "")) %>%
+  group_by(category) %>%
+  summarize(Shortages = n()) %>%
+  mutate(percent_shortages = round(Shortages/sum(Shortages) * 100, digits=2)) %>%
+  arrange(desc(percent_shortages)) %>%
+  rename(Category = category, 
+         "% of all shortages" = percent_shortages)
+```
+
 
 ### Shortages for an ATC superclass
 ```{r}

@@ -16,6 +16,11 @@ library(lubridate)
 FAR_FUTURE = parse_datetime("2100-12-31")
 FAR_PAST = parse_datetime("1970-01-01")
 DATA_UPDATED_DATE = parse_datetime("2019-12-25")
+
+DPD_DATA_DIR = 'data/dpd/'  # Load the Health Canada Drug Product Database
+DPD_DOWNLOAD = FALSE   # set to TRUE to attempt to download the latest DPD dataset
+DPD_URL_BASE='http://www.hc-sc.gc.ca/dhp-mps/alt_formats/zip/prodpharma/databasdon/'
+
 theme_set(theme_minimal())
 caption = list(labs(caption =  paste(
   paste("source: drugshortagescanada.ca, last updated:", DATA_UPDATED_DATE), 
@@ -29,6 +34,7 @@ dsc_df = read_csv(DSCDATA, trim_ws = T,
                     status = col_factor(),
                     shortage_reason_en = col_factor()
                   )) %>%
+  select(-starts_with("fr_"), -ends_with("_fr")) %>%
   mutate(
     reason = fct_recode(shortage_reason_en,  
       "Demand increase" = "Demand increase for the drug.", 
@@ -43,6 +49,79 @@ dsc_df = read_csv(DSCDATA, trim_ws = T,
   mutate(
     end_date_no_na = coalesce(actual_end_date, estimated_end_date, FAR_FUTURE), 
     start_date_no_na = coalesce(actual_start_date, anticipated_start_date, FAR_PAST))
+
+## Parsual EML
+# https://dx.doi.org/10.9778%2Fcmajo.20160122
+emlist = read_csv('data/cleanmeds.csv', trim_ws=T, col_types = cols()) %>% 
+  select(category, medication, ATC)
+
+## DPD
+if(DPD_DOWNLOAD) {
+  for (f in c('allfiles.zip', 'allfiles_ia.zip', 'allfiles_ap.zip', 'allfiles_dr.zip')) {
+    destfile = paste0(DPD_DATA_DIR, f)
+    download.file(paste0(DPD_URL_BASE, f), destfile)
+    unzip(destfile, exdir = DPD_DATA_DIR)
+  }
+}
+
+tables = list(
+  comp = c("DRUG_CODE","MFR_CODE","COMPANY_CODE","COMPANY_NAME","COMPANY_TYPE",
+           "ADDRESS_MAILING_FLAG","ADDRESS_BILLING_FLAG",
+           "ADDRESS_NOTIFICATION_FLAG","ADDRESS_OTHER","SUITE_NUMBER",
+           "STREET_NAME","CITY_NAME","PROVINCE","COUNTRY","POSTAL_CODE",
+           "POST_OFFICE_BOX","PROVINCE_F","COUNTRY_F"),
+  form = c("DRUG_CODE","PHARM_FORM_CODE","PHARMACEUTICAL_FORM",
+           "PHARMACEUTICAL_FORM_F"),
+  ingred = c("DRUG_CODE","ACTIVE_INGREDIENT_CODE","INGREDIENT",
+             "INGREDIENT_SUPPLIED_IND","STRENGTH","STRENGTH_UNIT",
+             "STRENGTH_TYPE","DOSAGE_VALUE","BASE","DOSAGE_UNIT","NOTES",
+             "INGREDIENT_F","STRENGTH_UNIT_F","STRENGTH_TYPE_F","DOSAGE_UNIT_F"),
+  package = c("DRUG_CODE","UPC","PACKAGE_SIZE_UNIT","PACKAGE_TYPE",
+              "PACKAGE_SIZE","PRODUCT_INFORMATION","PACKAGE_SIZE_UNIT_F",
+              "PACKAGE_TYPE_F"),
+  pharm = c("DRUG_CODE","PHARMACEUTICAL_STD"),
+  drug = c("DRUG_CODE","PRODUCT_CATEGORIZATION","CLASS",
+           "DRUG_IDENTIFICATION_NUMBER","BRAND_NAME","DESCRIPTOR",
+           "PEDIATRIC_FLAG","ACCESSION_NUMBER","NUMBER_OF_AIS",
+           "LAST_UPDATE_DATE","AI_GROUP_NO","CLASS_F","BRAND_NAME_F",
+           "DESCRIPTOR_F"),
+  route = c("DRUG_CODE","ROUTE_OF_ADMINISTRATION_CODE",
+            "ROUTE_OF_ADMINISTRATION","ROUTE_OF_ADMINISTRATION_F"),
+  sched = c("DRUG_CODE","SCHEDULE","SCHEDULE_F"),
+  status = c("DRUG_CODE","CURRENT_STATUS_FLAG","STATUS","HISTORY_DATE",
+             "STATUS_F","LOT_NUMBER","EXPIRATION_DATE"),
+  ther = c("DRUG_CODE","TC_ATC_NUMBER","TC_ATC","TC_AHFS_NUMBER","TC_AHFS",
+           "TC_ATC_F","TC_AHFS_F"),
+  vet = c("DRUG_CODE","VET_SPECIES","VET_SUB_SPECIES","VET_SPECIES_F")
+)
+
+for (table_name in names(tables)) {
+  headers = tables[[table_name]]
+  # create new variables based on the DPD table names (e.g. dpd_vet) and load in the
+  # data from the corresponding files (active, inactive, etc..) and merge them
+  assign(paste0('dpd_', table_name), 
+    dir(DPD_DATA_DIR, pattern = paste0(table_name, '.*.txt$'), full.names = TRUE) %>%
+      keep(function(x) file.size(x) > 0) %>%
+      map(read_csv, 
+          col_names = headers, 
+          locale = locale('en', date_format = '%d-%b-%Y'), 
+          col_types = map(headers,  function (x) # guess base on name 
+            case_when(
+              endsWith(x, '_DATE') ~ 'D', 
+              x == 'DRUG_CODE' ~ 'i', 
+              TRUE ~ 'c')) %>% 
+          setNames(headers), progress = FALSE) %>%
+      reduce(rbind) %>%
+      select(-ends_with("_F"))  # je ne parle pas bien le francais 
+  )
+}
+
+## Add the DPD ATC number to the DSC data
+din_to_atc = inner_join(dpd_drug, dpd_ther, by="DRUG_CODE") %>% 
+  select(din = DRUG_IDENTIFICATION_NUMBER, dpd_atc_number = TC_ATC_NUMBER) %>% 
+  distinct()
+
+dsc_df = left_join(dsc_df, din_to_atc, by=c("din"))
 ```
 
 Shortages
@@ -177,19 +256,15 @@ Column
 
 ### Essential medicines impacted by shortages in 2019
 ```{r}
-# via https://dx.doi.org/10.9778%2Fcmajo.20160122
-emlist = read_csv('data/cleanmeds.csv', trim_ws=T, col_types = cols()) %>% 
-  select(category, medication, atc_number)
-
 emls_with_shortages = dsc_df %>%
   filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
-  right_join(emlist, by="atc_number")  %>%
+  right_join(emlist, by=c("dpd_atc_number" = "ATC"))  %>%
   filter(!is.na(din))  %>%
-  group_by(category, medication, atc_number) %>%
+  group_by(category, medication, dpd_atc_number) %>%
   summarize(Shortages = n()) %>%
   rename(Category = category, 
          Medication = medication,
-         ATC = atc_number) %>%
+         ATC = dpd_atc_number) %>%
   arrange(desc(Shortages))
 knitr::kable(emls_with_shortages)
 ```
@@ -198,8 +273,9 @@ knitr::kable(emls_with_shortages)
 ```{r}
 shortages_by_eml = dsc_df %>%
   filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
-  left_join(emlist, by="atc_number") %>%
+  left_join(emlist, by=c("dpd_atc_number" = "ATC")) %>%
   mutate(category = replace_na(category, "Not an essential medicine")) %>%
+  mutate(category = str_replace(category, " -.*", "")) %>%
   group_by(category) %>%
   summarize(Shortages = n()) %>%
   mutate(percent_shortages = round(Shortages/sum(Shortages) * 100, digits=2)) %>%
@@ -208,6 +284,24 @@ shortages_by_eml = dsc_df %>%
          "% of all shortages" = percent_shortages)
 knitr::kable(shortages_by_eml)
 ```
+
+Column {data-width=250}
+-----------------------------------------------------------------------
+
+### Shortages of Essential Medicines in 2019
+```{r}
+valueBox(nrow(emls_with_shortages), icon="fa-ambulance")
+```
+
+### Of all shortages in 2019
+```{r}
+valueBox(
+  paste0(100-shortages_by_eml$'% of all shortages'[[1]], "%"),
+  icon="fa-chart-pie")
+```
+
+
+
 
 
 About
