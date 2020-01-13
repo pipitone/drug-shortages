@@ -22,28 +22,94 @@ diltiazem = "C08DB01"
 candesarten = "C09CA06"
 gabapentin = "N03AX12"
 
-dsc.shortages  %>%
-  filter(dpd_atc_number == diltiazem) %>%
-  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+dsc %>%
+  filter(dpd_atc_number == hcs) %>%
+  #filter(int_overlaps("2017-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na) | 
+  #         discontinuation_date %within% interval(parse_date("2017-01-01"), parse_date("2019-12-31"))) %>%
   mutate(
+    start_date = coalesce(actual_start_date, anticipated_start_date), 
     actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
     actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
-    label = factor(id, labels = paste(en_drug_common_name, drug_strength)),
-    label = fct_reorder(label, actual_start_date, .desc=F), 
+    label = factor(din),
+    label = fct_reorder(label, start_date, .desc=F), 
     ) %>%
-  ggplot(aes(x=actual_start_date, y=label, yend=label, color = reason)) + 
-    geom_segment(size=1, aes(xend=actual_end_date_far), linetype="dashed") + 
-    geom_segment(size=4, aes(xend=actual_end_date_near), linetype="solid") + 
+  ggplot(aes(x=start_date, y=label, yend=label, color = reason)) + 
+    geom_segment(size=2, aes(xend=actual_end_date_near), linetype="solid") + 
+    geom_point(aes(x=discontinuation_date), color = "red", size = 2, shape = 4, stroke = 2) + 
     facet_grid(company_name~., scales="free_y", space="free_y") + 
     scale_colour_brewer(palette = "Paired") + 
     theme(strip.placement="outside", 
           strip.text.y = element_text(angle=0), 
           strip.background = element_rect(color="white", fill="#EEEEEE")) +
     labs(y = NULL, x="Time", color="Reason for shortage", 
-         title="Shortages for Diltiazem in 2019") + 
+         title="Shortages/Discontinuations") + 
     caption
     
 ```
+
+### Proportion of marketed drugs available over time
+```{r}
+.dpd_status_ordered = dpd$status %>%
+  group_by(DRUG_CODE) %>%
+  arrange(HISTORY_DATE, .by_group = T) %>%
+  mutate(.curr = 1:n(), .prev = .curr-1, .last = n()) %>%
+  ungroup()
+
+# complex join so that LHS has FROM status and RHS has TO status
+# Also includes pair when LHS is the most recent status and then RHS is ignored
+dpd_status_intervals = inner_join(.dpd_status_ordered, .dpd_status_ordered, by="DRUG_CODE") %>%
+  select(-starts_with("CURRENT"), -starts_with("LOT"), -starts_with("EXP")) %>%
+  filter(.prev.y == .curr.x | (.curr.x == .last.x & .curr.x == .curr.y)) %>%
+  transmute(
+    DRUG_CODE = DRUG_CODE, 
+    start_date = HISTORY_DATE.x,
+    end_date = if_else(.curr.x == .last.x, as_date(FAR_FUTURE), HISTORY_DATE.y), 
+    status = STATUS.x)
+
+# now, for each month, let's compute the total number of drugs marketed, for each ATC code
+dpd.months = tibble(
+  month.date = seq(as_date("2017-01-01"), as_date("2020-01-01"), by='1 month'), 
+  n = 1)
+
+dpd_num_marketed_by_atc = dpd_status_intervals %>% mutate(n=1) %>%
+  inner_join(dpd.months, by="n") %>%
+  filter(month.date %within% interval(start_date, end_date)) %>%
+  select(DRUG_CODE, status, month.date) %>%
+  inner_join(select(dpd$ther, DRUG_CODE, TC_ATC_NUMBER), by = "DRUG_CODE") %>%
+  group_by(month.date, TC_ATC_NUMBER) %>%
+  summarize(marketed = sum(status == "MARKETED"))
+
+dsc_num_shortages_by_atc = dsc.shortages %>%
+  mutate(n=1) %>%
+  inner_join(dpd.months, by="n") %>%
+  filter(month.date %within% interval(actual_start_date, end_date_no_na)) %>%
+  distinct(month.date, dpd_atc_number, din) %>%
+  group_by(month.date, dpd_atc_number) %>%
+  summarize(shortages = n())
+
+diltiazem = "C08DB01"
+potassium = "A12BA01"
+hcs = "D07AA02"
+
+right_join(dsc_num_shortages_by_atc, dpd_num_marketed_by_atc, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  mutate(shortages = replace_na(shortages, 0), 
+    percent_available = (marketed - shortages) / marketed * 100) %>%
+  inner_join(eml, by= c("dpd_atc_number" = "ATC")) %>%
+  filter(dpd_atc_number == candesarten) %>%
+  ggplot(aes(x = month.date, color = medication, ymin = shortages, ymax = marketed)) +
+    geom_ribbon(aes(fill = medication)) + 
+    facet_wrap(~medication) + 
+    theme(legend.position="none")
+
+# What is up with HCS? 
+inner_join(dpd$ther, filter(dpd$status, CURRENT_STATUS_FLAG == 'Y')) %>%
+  filter(TC_ATC_NUMBER == hcs) %>%
+  inner_join(dpd$comp)
+
+View(filter(dsc, dpd_atc_number == hcs))
+```
+
+
 ### How well are ATC_number's recorded
 ```{r}
 #TODO why NA? 
