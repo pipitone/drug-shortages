@@ -24,16 +24,15 @@ FAR_PAST     = parse_datetime("1970-01-01")
 
 theme_set(theme_minimal())
 caption = list(labs(caption =  paste(
-  paste("source: drugshortagescanada.ca, last updated:", as_date(file.info(DSC_PATH)$ctime)), 
-  "jon.pipitone.ca/research/drug-shortages", 
-  sep="\n")))
+  paste(
+    "source: drugshortagescanada.ca, last updated:", as_date(file.info(DSC_PATH)$ctime)), 
+    "source: Health Canada Drug Product Database",
+    "jon.pipitone.ca/research/drug-shortages", 
+    sep="\n")))
 
 # load data
 if (F) { 
-  user = getOption("dsc.username")
-  pass = getOption("dsc.password")
-  token = dsc_login(user, pass)
-  dsc = dsc_search(token)  %>%
+  dsc = dsc_search(term="venla")  %>%
     select_if(~ !is.list(.x)) %>%
     write_csv(DSC_PATH)
 }

@@ -4,26 +4,16 @@ output: html_notebook
 ---
 
 Note: meant to be use used in conjunction with the dashboard.Rmd setup. 
-### Shortages by ATC code
-```{r}
-dsc.shortages %>%
-  filter(actual_start_date > ymd("2019-01-01")) %>%
-  filter(status %in% c("resolved", "active_confirmed")) %>%
-  group_by(dpd_atc_number) %>%
-  summarize(n=n()) %>%
-  filter(n>40) %>%
-  ggplot(aes(x=dpd_atc_number,y=n)) +
-    geom_bar(stat="identity")
-```
-### Diltiazem
+
+### A closer look at a single drug's shortages / discontinuations 
 ```{r}
 ramipril = "C09AA05"
 diltiazem = "C08DB01"
-candesarten = "C09CA06"
+candesartan = "C09CA06"
 gabapentin = "N03AX12"
 
 dsc %>%
-  filter(dpd_atc_number == hcs) %>%
+  filter(dpd_atc_number == diltiazem) %>%
   #filter(int_overlaps("2017-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na) | 
   #         discontinuation_date %within% interval(parse_date("2017-01-01"), parse_date("2019-12-31"))) %>%
   mutate(
@@ -48,7 +38,9 @@ dsc %>%
 ```
 
 ### Proportion of marketed drugs available over time
-```{r}
+
+First we do some setup
+```{r setup}
 .dpd_status_ordered = dpd$status %>%
   group_by(DRUG_CODE) %>%
   arrange(HISTORY_DATE, .by_group = T) %>%
@@ -66,10 +58,19 @@ dpd_status_intervals = inner_join(.dpd_status_ordered, .dpd_status_ordered, by="
     end_date = if_else(.curr.x == .last.x, as_date(FAR_FUTURE), HISTORY_DATE.y), 
     status = STATUS.x)
 
+```
+
+
+Now, let's look more in depth at a single drug's availability:
+```{r}
+
+# date range to show 
+FROM = as_date("2010-01-01")
+TO = as_date("2020-01-01")
+BY = "1 month"  # warning: if the FROM-TO range is large (e.g. > 20 years), change BY to something larger, e.g. 3 months
+
 # now, for each month, let's compute the total number of drugs marketed, for each ATC code
-dpd.months = tibble(
-  month.date = seq(as_date("2017-01-01"), as_date("2020-01-01"), by='1 month'), 
-  n = 1)
+dpd.months = tibble(month.date = seq(FROM, TO, by=BY),  n = 1)
 
 dpd_num_marketed_by_atc = dpd_status_intervals %>% mutate(n=1) %>%
   inner_join(dpd.months, by="n") %>%
@@ -87,28 +88,284 @@ dsc_num_shortages_by_atc = dsc.shortages %>%
   group_by(month.date, dpd_atc_number) %>%
   summarize(shortages = n())
 
+# useful ATC codes
 diltiazem = "C08DB01"
 potassium = "A12BA01"
 hcs = "D07AA02"
+ranitidine = "A02BA02"
+famotidine = "A02BA03"
+candesarten = "C09CA06"
 
-right_join(dsc_num_shortages_by_atc, dpd_num_marketed_by_atc, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
-  mutate(shortages = replace_na(shortages, 0), 
-    percent_available = (marketed - shortages) / marketed * 100) %>%
-  inner_join(eml, by= c("dpd_atc_number" = "ATC")) %>%
-  filter(dpd_atc_number == candesarten) %>%
-  ggplot(aes(x = month.date, color = medication, ymin = shortages, ymax = marketed)) +
-    geom_ribbon(aes(fill = medication)) + 
-    facet_wrap(~medication) + 
-    theme(legend.position="none")
-
-# What is up with HCS? 
-inner_join(dpd$ther, filter(dpd$status, CURRENT_STATUS_FLAG == 'Y')) %>%
-  filter(TC_ATC_NUMBER == hcs) %>%
-  inner_join(dpd$comp)
-
-View(filter(dsc, dpd_atc_number == hcs))
+right_join(dsc_num_shortages_by_atc, dpd_num_marketed_by_atc, 
+           by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  filter(dpd_atc_number == hcs) %>%   # Select DRUGS here
+  mutate(Marketed = marketed, 
+         Available = marketed - shortages, 
+         "In shortage" = shortages) %>%
+  pivot_longer(cols = Marketed:Available, names_to = "status", values_to = "count") %>%
+  ggplot(aes(x = month.date, y=count, linetype = fct_rev(status))) +
+    geom_line(alpha = 0.8) + 
+    #facet_wrap(. ~ dpd_atc_number, ncol=1) +
+    labs(x="Date", y = "# of DINs",
+         colour = NULL, 
+         linetype = NULL, 
+         title = "Availability of Topical Hydrocortisone") + 
+    expand_limits(y=0) + 
+  caption
 ```
 
+## Ranitidine and Famotidine story
+
+### manufacturers over time
+```{r}
+ranitidine = "A02BA02"
+famotidine = "A02BA03"
+
+dpd.months.long = tibble(
+  month.date = seq(as_date("1980-01-01"), as_date("2020-01-01"), by='1 month'), 
+  n = 1)
+
+dpd$ther %>%
+  filter(TC_ATC_NUMBER %in% c(ranitidine, famotidine)) %>%
+  mutate(TC_ATC_NUMBER = str_sub(TC_ATC_NUMBER, 1, 4)) %>%
+  inner_join(dpd$comp, by = "DRUG_CODE") %>%
+  inner_join(dpd_status_intervals, by = "DRUG_CODE") %>%
+  filter(status == "MARKETED") %>%
+  select(COMPANY_NAME, TC_ATC, start_date, end_date, status) %>% 
+  mutate(n=1) %>%
+  inner_join(dpd.months.long, by="n") %>%
+  filter(month.date %within% interval(start_date, end_date)) %>% 
+  group_by(month.date, TC_ATC, COMPANY_NAME) %>%
+  summarize() %>%
+  group_by(month.date, TC_ATC) %>%
+  tally() %>%
+  mutate(TC_ATC = str_to_title(TC_ATC)) %>%
+  ggplot(aes(x=month.date, y = n, color = TC_ATC)) +
+  geom_line() + 
+  labs(title="Manufacturers of marketed products", 
+       color = NULL,
+       y = "Count", x = "Date")
+  
+  
+```
+
+And now by ATC 3rd level: 
+```{r}
+
+dpd.months.long = tibble(
+  month.date = seq(as_date("2000-01-01"), as_date("2020-01-01"), by='1 month'), 
+  n = 1)
+
+data = dpd$ther %>%
+  mutate(atc_class = str_sub(TC_ATC_NUMBER, 1, 4)) %>%
+  inner_join(dpd$comp, by = "DRUG_CODE") %>%
+  group_by(DRUG_CODE, atc_class, COMPANY_NAME)%>%
+  summarise() %>%
+  inner_join(filter(dpd_status_intervals, status == "MARKETED"), by = "DRUG_CODE") %>%
+  select(COMPANY_NAME, atc_class, start_date, end_date, status) %>% 
+  mutate(n=1) %>%
+  inner_join(dpd.months.long, by="n") %>%
+  filter(month.date %within% interval(start_date, end_date)) %>% 
+  group_by(month.date, atc_class, COMPANY_NAME) %>%
+  summarize() %>%
+  group_by(month.date, atc_class) %>%
+  tally()
+
+data2 = data %>%
+  filter(!is.na(atc_class)) %>%
+  group_by(atc_class) %>%
+  filter(max(n) > 100) 
+ 
+data3 = data2 %>% 
+  group_by(atc_class) %>% 
+  arrange(month.date, .by_group = T) %>% 
+  summarize(month.date = last(month.date), n = last(n))
+
+data2 %>%
+  ggplot(aes(x=month.date, y = n, colour = atc_class)) +
+  geom_line() + 
+  geom_label(data = data3, aes(x = month.date, y = n, label = atc_class), 
+             position = position_dodge2(width=1)) + 
+  scale_color_brewer(palette = "Dark2") + 
+  labs(title="Manufacturers of marketed products grouped by 3rd level ATC", 
+       color = NULL,
+       y = "Count", x = "Date") 
+  
+```
+
+
+
+### Availability 
+```{r}
+# now, for each month, let's compute the total number of drugs marketed, for each ATC code
+
+dpd.months.long = tibble(
+  month.date = seq(as_date("1980-01-01"), as_date("2020-01-01"), by='3 month'), 
+  n = 1)
+
+dpd_marketed.long = dpd_status_intervals %>% mutate(n=1) %>%
+  inner_join(dpd.months.long, by="n") %>%
+  filter(month.date %within% interval(start_date, end_date)) %>%
+  select(DRUG_CODE, status, month.date) %>%
+  inner_join(select(dpd$ther, DRUG_CODE, TC_ATC_NUMBER), by = "DRUG_CODE") %>%
+  group_by(month.date, TC_ATC_NUMBER) %>%
+  summarize(marketed = sum(status == "MARKETED"))
+
+dsc_shortages.long = dsc.shortages %>%
+  mutate(n=1) %>%
+  inner_join(dpd.months.long, by="n") %>%
+  filter(month.date %within% interval(actual_start_date, end_date_no_na)) %>%
+  distinct(month.date, dpd_atc_number, din) %>%
+  group_by(month.date, dpd_atc_number) %>%
+  summarize(shortages = n())
+
+
+ranitidine = "A02BA02"
+famotidine = "A02BA03"
+right_join(dsc_shortages.long, dpd_marketed.long, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  filter(dpd_atc_number %in% c(famotidine, ranitidine)) %>%
+  mutate(Marketed = marketed, 
+         Available = marketed - shortages, 
+         "In shortage" = shortages, 
+         ) %>%
+  pivot_longer(cols = Marketed:Available, names_to = "status", values_to = "count") %>%
+  mutate(dpd_atc_number = factor(dpd_atc_number,  levels = c(ranitidine, famotidine),  labels = c("Ranitidine", "Famotidine"))) %>%
+  ggplot(aes(x = month.date, y=count, color = dpd_atc_number, linetype = fct_rev(status))) +
+    geom_line(alpha = 0.8) + 
+    facet_wrap(. ~ dpd_atc_number, ncol=1) +
+    labs(x="Date", y = "# of DINs",
+         colour = "Drug", 
+         linetype = NULL, 
+         title = "Availability of Ranitidine and Famotidine") + 
+  caption
+```
+
+### A look at anti-acids more broadly
+
+First let's look at h2 blockers, and make a crude plot of total din availability and shortages
+```{r}
+h2blockers = "A02BA"
+h2blocker_shortages = dsc_num_shortages_by_atc %>%
+  filter(str_starts(dpd_atc_number, h2blockers))
+
+h2blockers_marketed = dpd_num_marketed_by_atc  %>%
+  filter(str_starts(TC_ATC_NUMBER, h2blockers))
+
+right_join(h2blocker_shortages, h2blockers_marketed, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  ungroup() %>%
+  mutate(shortages = replace_na(shortages, 0)) %>%
+  mutate(available = marketed - shortages) %>%
+  group_by(month.date) %>%
+  summarize(Available = sum(available), Marketed = sum(marketed)) %>%
+  pivot_longer(cols = Available:Marketed, names_to = "status", values_to = "count") %>%
+  ggplot(aes(x = month.date, y = count, linetype = fct_rev(status))) +
+    geom_line()  + 
+    labs(x="Date", y = "# of DINs", 
+         linetype = NULL, title = "Availability of H2-blockers") + 
+    expand_limits(y=0) + 
+  
+  caption
+  
+```
+
+Broken out by ATC code: 
+```{r}
+right_join(h2blocker_shortages, h2blockers_marketed, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  ungroup() %>%
+  mutate(shortages = replace_na(shortages, 0)) %>%
+  mutate(available = marketed - shortages) %>%
+  group_by(month.date, dpd_atc_number) %>%
+  summarize(Available = sum(available), Marketed = sum(marketed)) %>%
+  pivot_longer(cols = Available:Marketed, names_to = "status", values_to = "count") %>%
+  ggplot(aes(x = month.date, y = count, linetype = fct_rev(status))) +
+    geom_line()  + 
+    labs(x="Date", y = "# of DINs",  linetype = NULL, 
+         title = "Availability of H2-blockers") + 
+    expand_limits(y=0) + 
+    facet_wrap(~dpd_atc_number) + 
+    caption 
+
+```
+
+And now, all antacids: 
+
+```{r}
+antacids = "A02B"
+antacid_shortages = dsc_num_shortages_by_atc %>%
+  filter(str_starts(dpd_atc_number, antacids))
+
+antacids_marketed = dpd_num_marketed_by_atc  %>%
+  filter(str_starts(TC_ATC_NUMBER, antacids))
+
+right_join(antacid_shortages, antacids_marketed, by = c("month.date" = "month.date", "dpd_atc_number" = "TC_ATC_NUMBER")) %>%
+  ungroup() %>%
+  mutate(shortages = replace_na(shortages, 0)) %>%
+  mutate(available = marketed - shortages) %>%
+  mutate(atc_4th = str_sub(dpd_atc_number, 1,5)) %>%
+  group_by(month.date, atc_4th) %>%
+  summarize(Available = sum(available), Marketed = sum(marketed)) %>%
+  pivot_longer(cols = Available:Marketed, names_to = "status", values_to = "count") %>%
+  ggplot(aes(x = month.date, y = count, linetype = fct_rev(status))) +
+    geom_line()  + 
+    labs(x="Date", y = "# of DINs",  linetype = NULL, 
+         title = "Availability of drugs for peptic ulcer and GERD") + 
+    expand_limits(y=0) + 
+    facet_wrap(~atc_4th) + 
+    caption
+```
+
+First, the visual plotting of the shortages and discontinuations. 
+
+```{r}
+dsc %>%
+  filter(dpd_atc_number == ranitidine) %>%
+  mutate(
+    start_date = coalesce(actual_start_date, anticipated_start_date), 
+    actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
+    actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
+    label = factor(din),
+    label = fct_reorder(label, start_date, .desc=F), 
+    reason = replace_na(reason, "Other"), 
+    ) %>%
+  ggplot(aes(x=start_date, y=label, yend=label, color = reason)) + 
+    geom_segment(size=2, aes(xend=actual_end_date_near), linetype="solid") + 
+    geom_point(aes(x=discontinuation_date), color = "black", size = 2, shape = 4, stroke = 2) + 
+    facet_grid(company_name~., scales="free_y", space="free_y") + 
+    scale_colour_brewer(palette = "Paired") + 
+    theme(strip.placement="outside", 
+          strip.text.y = element_text(angle=0), 
+          strip.background = element_rect(color="white", fill="#EEEEEE")) +
+    labs(y = "DIN", x="Date", color="Reason for shortage", 
+         title="Shortages/Discontinuations of Ranitidine") + 
+    caption
+```
+
+```{r}
+dsc %>%
+  filter(dpd_atc_number == famotidine) %>%
+  mutate(
+    start_date = coalesce(actual_start_date, anticipated_start_date), 
+    actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
+    actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
+    label = factor(din),
+    label = fct_reorder(label, start_date, .desc=F), 
+    reason = replace_na(reason, "Other"), 
+    ) %>%
+  ggplot(aes(x=start_date, y=label, yend=label, color = reason)) + 
+    geom_segment(size=2, aes(xend=actual_end_date_near), linetype="solid") + 
+    geom_point(aes(x=discontinuation_date), color = "black", size = 2, shape = 4, stroke = 2) + 
+    facet_grid(company_name~., scales="free_y", space="free_y") + 
+    scale_colour_brewer(palette = "Paired") + 
+    theme(strip.placement="outside", 
+          strip.text.y = element_text(angle=0), 
+          strip.background = element_rect(color="white", fill="#EEEEEE")) +
+    labs(y = NULL, x="Date", color="Reason for shortage", 
+         title="Shortages/Discontinuations of Famotidine") + 
+    caption
+
+```
+
+## Data quality 
 
 ### How well are ATC_number's recorded
 ```{r}
@@ -139,59 +396,7 @@ dsc %>%
   filter(atc_number != tc_substr)
 ```
 
-### redo the EML analysis with the patched ATCs
-```{r}
-dsc.shortages %>%
-  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
-  right_join(eml, by=c("dpd_atc_number" = "ATC"))  %>%
-  filter(!is.na(din))  %>%
-  group_by(category, medication, dpd_atc_number) %>%
-  summarize(Shortages = n()) %>%
-  rename(Category = category, 
-         Medication = medication,
-         ATC = dpd_atc_number) %>%
-  arrange(desc(Shortages))
-```
-
-All 2019 shortages by EML category
-```{r}
-dsc.shortages %>%
-  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
-  left_join(eml, by=c("dpd_atc_number" = "ATC"))  %>%
-  mutate(category = replace_na(category, "Not an essential medicine")) %>%
-  mutate(category = str_replace(category, " -.*", "")) %>%
-  group_by(category) %>%
-  summarize(Shortages = n()) %>%
-  mutate(percent_shortages = round(Shortages/sum(Shortages) * 100, digits=2)) %>%
-  arrange(desc(percent_shortages)) %>%
-  rename(Category = category, 
-         "% of all shortages" = percent_shortages)
-```
-
-
-### Shortages for an ATC superclass
-```{r}
-dsc.shortages %>%
-  filter(actual_start_date > "2018-01-01") %>%
-  mutate(atc_short = substr(atc_number,1,5)) %>%
-  filter(atc_short == "C09CA") %>%
-  mutate(
-    actual_end_date_near = replace_na(actual_end_date, parse_datetime("2020-01-01")), 
-    actual_end_date_far  = replace_na(actual_end_date, parse_datetime("2020-04-01")), 
-    id = fct_reorder(factor(id), actual_start_date), 
-    ) %>%
-  ggplot(aes(x=actual_start_date, y=id, yend=id, color = reason)) + 
-    geom_segment(size=1, aes(xend=actual_end_date_near), linetype="solid") + 
-    facet_grid(company_name~., scales="free_y", space="free_y") + 
-    scale_colour_brewer(palette = "Paired") + 
-    theme(strip.placement="outside", 
-          strip.text.y = element_blank(), 
-          axis.text.y = element_blank()) +
-    labs(y=NULL, x=NULL, color="Reason for shortage", 
-         title="Shortages for in C09CA") + 
-    caption
-```
-
+## Timing
 
 ### Do shortages occur during particular times of the year, etc?
 
@@ -221,7 +426,6 @@ durations %>%
   geom_histogram(bins=7,stat="count")
 ```
 
-### 
 ### Advanced warning
 ```{r}
 dsc.shortages %>%

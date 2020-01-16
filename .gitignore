@@ -7,3 +7,4 @@ data/dpd/
 packrat/lib*
 packrat/src
 packrat/lib*/
+.Renviron
