@@ -439,7 +439,139 @@ dsc.shortages %>%
   facet_wrap(~reason) + 
   labs(x="Time between report created and shortage start date (months)", 
        y = "Number of shortages", 
-       title = "Advanced warning for shortages") + 
+       title = "Advanced warning for shortages in 2019") + 
   scale_y_log10() + 
   caption
+ggsave(filename="advanced-warning.svg", width=6, height=4)
+
 ```  
+
+## Rate of shortages by manufacturer 
+```{r}
+years = tibble(
+  year.start = seq(as_date("2017-01-01"), as_date("2019-01-01"), by='1 year'), 
+  n = 1) %>% 
+  mutate(
+    year.end = year.start + years(1))
+
+dpd_marketed = dpd_status_intervals %>% mutate(n=1) %>%
+  filter(status == "MARKETED") %>%
+  inner_join(years, by="n") %>%
+  filter(int_overlaps(interval(year.start, year.end), interval(start_date, end_date))) %>%
+  select(DRUG_CODE, year.start) %>%
+  inner_join(select(dpd$comp, DRUG_CODE, COMPANY_NAME), by = "DRUG_CODE") %>%
+  group_by(year.start, COMPANY_NAME) %>%
+  summarize(n_products = n())
+
+dsc_shortage = dsc.shortages %>%
+  mutate(n=1) %>%
+  inner_join(years, date, by="n") %>%
+  #filter(int_overlaps(interval(year.start, year.end), interval(actual_start_date, end_date_no_na))) %>%
+  filter(year(year.start) == year(actual_start_date)) %>%
+  inner_join(dpd$drug, by=c('din' = 'DRUG_IDENTIFICATION_NUMBER')) %>%
+  inner_join(select(dpd$comp, DRUG_CODE, COMPANY_NAME), by = "DRUG_CODE") %>%
+  group_by(year.start, COMPANY_NAME) %>%
+  summarize(n_shortages = n())
+
+data = inner_join(dsc_shortage, dpd_marketed, by=c('year.start', 'COMPANY_NAME')) %>%
+  mutate(Year = as.factor(year(year.start)))
+data %>%
+  ggplot(aes(x = n_products, y = n_shortages, label = COMPANY_NAME, shape = Year)) + 
+  geom_point() + 
+  geom_text(data = filter(data, n_products > 400), 
+            nudge_x = 10, 
+            size = 2, hjust = "left", check_overlap = T) + 
+  coord_equal() + 
+  scale_x_continuous("Marketed products", breaks = seq(0, 1000, 200)) + 
+  scale_y_continuous("Shortages", breaks = seq(0, 1000, 200)) + 
+  labs(title = "New shortages vs marketed products by manufacturer")
+  caption
+
+ggsave(filename="shortages-by-manufacturer-size.svg", width=6, height=4)
+```
+
+### Shortages by start date: 
+```{r}
+dsc %>% 
+  mutate(event_date = coalesce(actual_start_date, discontinuation_date)) %>%
+  filter(event_date > as_date("2017-01-01")) %>%
+  mutate(month.start = floor_date(event_date, unit = "month")) %>% 
+  group_by(month.start, status) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(month.start) %>%
+  mutate(total_shortages = sum(n[status %in% c("active_confirmed", "resolved")])) %>%
+  ggplot(aes(x = month.start, y = n, color = status)) + 
+  geom_line() + geom_point() + 
+  geom_smooth(method = "lm", mapping = aes(y = total_shortages, color = "Total Shortages")) + 
+  labs(title = "Monthly shortages/discontinuations by start date", 
+       x = "Date", y = "Count") +
+  theme(legend.position = "bottom") + 
+  caption
+ggsave(filename="shortages-start-date.svg", width=6, height=4)
+```
+
+### EML: What if shortages happened uniformly across DINs
+
+Is it at all surprising that the EML drugs have 25% of all of the shortages? All
+things being equal, we could find out what the expected % of shortages would be
+simply by looking at the number of marketed drugs and the number of shortages.
+
+```{r}
+.atcs_2019 = inner_join(dpd$ther, dpd$status, by = "DRUG_CODE") %>%
+  filter(CURRENT_STATUS_FLAG == "Y",
+         STATUS == "MARKETED", 
+         HISTORY_DATE < as_date("2019-12-31")) %>%
+  distinct(TC_ATC_NUMBER) %>%
+  count() %>%
+  pluck(1)
+
+.dins_2019 = inner_join(dpd$ther, dpd$status, by = "DRUG_CODE") %>%
+  filter(CURRENT_STATUS_FLAG == "Y",
+         STATUS == "MARKETED", 
+         HISTORY_DATE < as_date("2019-12-31")) %>%
+  inner_join(dpd$drug, by = "DRUG_CODE") %>%
+  distinct(DRUG_IDENTIFICATION_NUMBER) %>%
+  count() %>%
+  pluck(1)
+
+.eml_atcs = nrow(eml) 
+
+.eml_dins = inner_join(eml, dpd$ther, by = c("ATC" = "TC_ATC_NUMBER")) %>%
+  inner_join(dpd$status, by = "DRUG_CODE") %>%
+  filter(CURRENT_STATUS_FLAG == "Y",
+         STATUS == "MARKETED", 
+         HISTORY_DATE < as_date("2019-12-31")) %>%
+  inner_join(dpd$drug, by = "DRUG_CODE") %>%
+  distinct(DRUG_IDENTIFICATION_NUMBER) %>%
+  count() %>% pluck(1)
+
+.shortages_2019 = dsc.shortages %>%
+  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+  count() %>% pluck(1)
+
+.shortages_atcs = dsc.shortages %>%
+  filter(int_overlaps("2019-01-01" %--% "2019-12-31", actual_start_date %--% end_date_no_na)) %>%
+  distinct(dpd_atc_number) %>%
+  count() %>% pluck(1)
+
+cat(
+  "",
+  "Marketed drugs in 2019:", .dins_2019, "\n",
+  "Shortages in 2019:", .shortages_2019, "\n",
+  "Drugs on EML 2019:", .eml_dins, "\n",
+  "Drugs: EML / total:", .eml_dins/.dins_2019, "\n",
+  "Expected % of shortages:", round(.eml_dins/.dins_2019*100,2), "%",  "\n", 
+  "ATCs marketed:", .atcs_2019, "\n",
+  "ATCs in shortage:", .shortages_atcs, "\n",
+  "EML ATCs:", .eml_atcs, "\n",
+  ""
+)
+```
+
+
+
+### ATCs on the EML that aren't in the DPD
+```{r}
+anti_join(eml, dpd$ther, by = c("ATC" = "TC_ATC_NUMBER"))
+```

@@ -152,6 +152,7 @@ ggplot(shortages.by.month, aes(x = month.start, y = n)) +
   geom_point() + geom_line() + 
   labs(x = "Date", y = "Number of drugs in shortage") + 
   caption
+ggsave(filename="shortages-total.svg", width=6, height=4)
 ```
 
 ### Shortage start date
@@ -191,6 +192,7 @@ data %>%
     labs(fill = "Year", x = "Duration (weeks)", y = "# of shortages") + 
     theme(legend.position = "none") + 
     caption
+ggsave(filename="duration.svg", width=6, height=4)
 ```
 
 
@@ -215,6 +217,7 @@ dsc.shortages %>%
     axis.text=element_blank(), 
     axis.ticks=element_blank()) +
   caption
+ggsave(filename="shortages-reason.svg", width=6, height=4)
 ```
 
 Column {data-width=350}
@@ -294,8 +297,12 @@ valueBox(nrow(emls_with_shortages), icon="fa-ambulance")
 
 ### Of all shortages in 2019
 ```{r}
+.not_eml_percent = shortages_by_eml %>% 
+  filter(Category == "Not an essential medicine") %>% 
+  pluck("% of all shortages", 1)
+
 valueBox(
-  paste0(100-shortages_by_eml$'% of all shortages'[[1]], "%"),
+  paste0(100-.not_eml_percent, "%"),
   icon="fa-chart-pie")
 ```
 
